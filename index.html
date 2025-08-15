@@ -1,0 +1,608 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Houston METRO — Bus Flow Animation (POC)</title>
+  <style>
+    :root{
+      --bg:#ffffff; --panel:#ffffff; --ink:#1f2937; --muted:#6b7280;
+      --line:#e5e7eb; --shadow:0 2px 12px rgba(0,0,0,.12);
+      --up:#1a7f37; --down:#b42318; --pill:#eef2f7; --pill-b:#cfd8e3;
+      --brand:#0b3a6b;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;height:100%;width:100%}
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:var(--ink);background:#f6f7fb}
+
+    #wrap{position:relative;height:100%;width:100%}
+    #map{position:absolute;inset:0}
+    #deck-canvas{position:absolute;inset:0;z-index:5;width:100%;height:100%}
+
+    /* Header branding */
+    .hdr{position:absolute;left:50%;transform:translateX(-50%);top:12px;z-index:12;
+         background:var(--panel);border-radius:12px;padding:10px 14px;box-shadow:var(--shadow);
+         display:flex;gap:10px;align-items:center;pointer-events:none}
+    .logo{width:10px;height:10px;border-radius:50%;background:var(--brand);box-shadow:0 0 0 3px rgba(11,58,107,.15)}
+    .hdr h1{margin:0;font-size:16px;letter-spacing:.2px}
+    .hdr .sub{color:var(--muted);font-size:12px;margin-left:8px}
+
+    /* Panels */
+    .ui,.insights{position:absolute;top:64px;background:var(--panel);padding:12px 14px;border-radius:12px;
+                  box-shadow:var(--shadow);z-index:10;width:320px;max-width:calc(100vw - 40px)}
+    .ui{left:20px}
+    .insights{right:20px}
+    label{display:block;margin:8px 0 4px;font-weight:600}
+    .row{display:flex;gap:8px;align-items:center}
+    .row span{min-width:56px;text-align:right;color:var(--muted)}
+    .muted{color:var(--muted)}
+    .small{font-size:12px;color:var(--muted)}
+    input[type="text"],select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font:inherit}
+    input[type="range"]{width:100%}
+
+    /* Insights */
+    .insights h3{margin:0 0 6px;font-size:15px}
+    .kpi{display:flex;justify-content:space-between;align-items:baseline;margin:6px 0 10px}
+    .kpi .big{font-size:22px;font-weight:800}
+    .pill{background:var(--pill);border:1px solid var(--pill-b);border-radius:999px;padding:2px 8px;font-size:12px}
+    .delta.up{color:var(--up)} .delta.down{color:var(--down)}
+    .list{max-height:430px;overflow:auto;margin-top:6px;border-top:1px solid var(--line)}
+    .item{display:grid;grid-template-columns:1fr auto;gap:8px;padding:8px 0;border-bottom:1px solid #f3f4f6;cursor:pointer}
+    .item .meta{grid-column:1/-1;font-size:12px;color:var(--muted)}
+    .item b{font-weight:600}
+    .item.hl{background:#f7fbff;font-weight:700}
+
+    /* Multi-select chips / suggestions */
+    .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+    .chip{background:var(--pill);border:1px solid var(--pill-b);border-radius:999px;padding:2px 8px;display:flex;gap:6px;align-items:center}
+    .chip b{font-weight:600}
+    .chip button{border:0;background:transparent;cursor:pointer;font-weight:700;color:#555}
+    .suggest{position:relative}
+    .suggest-list{position:absolute;left:0;right:0;top:100%;z-index:15;background:var(--panel);border:1px solid #ddd;border-radius:8px;max-height:220px;overflow:auto;display:none}
+    .suggest-item{padding:8px 10px;cursor:pointer}
+    .suggest-item:hover{background:#f3f6fa}
+
+    /* Tooltip */
+    #tt{position:absolute;z-index:20;pointer-events:none;background:#111;color:#fff;
+        font:12px system-ui;padding:6px 8px;border-radius:6px;opacity:.92;display:none}
+
+    /* Basemap refinement */
+    canvas.maplibregl-canvas{filter:contrast(1.05) brightness(1.03)}
+  </style>
+
+  <!-- libs -->
+  <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet"/>
+  <script src="https://unpkg.com/deck.gl@8.9.34/dist.min.js"></script>
+  <!-- JSZip kept but not used since normalization is disabled -->
+  <!-- <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script> -->
+</head>
+<body>
+<div id="wrap">
+  <!-- Header branding -->
+  <div class="hdr">
+    <div class="logo" aria-hidden="true"></div>
+    <h1>Houston METRO — Bus Flow</h1>
+    <div class="sub" id="hdrStamp">—</div>
+  </div>
+
+  <div id="map"></div>
+  <canvas id="deck-canvas"></canvas>
+  <div id="tt"></div>
+
+  <!-- LEFT CONTROLS -->
+  <div class="ui">
+    <label>Date</label>
+    <!-- Month/Year dropdowns (replaces <input type="month">) -->
+    <div class="row">
+      <select id="monthSel" style="flex:1"></select>
+      <select id="yearSel"  style="flex:1"></select>
+    </div>
+
+    <label>Day type</label>
+    <select id="daytype">
+      <option>Weekday</option>
+      <option>Saturday</option>
+      <option>Sunday</option>
+    </select>
+
+    <label>Particle scale (density)</label>
+    <div class="row">
+      <input id="scale" type="range" min="0" max=".5" step="0.02" value="0.28" style="flex:1"/>
+      <span id="scaleVal">0.28x</span>
+    </div>
+
+    <label>Particle size (radius in meters)</label>
+    <div class="row">
+      <input id="psize" type="range" min="100" max="300" step="10" value="190" style="flex:1"/>
+      <span id="psizeVal">190 m</span>
+    </div>
+
+    <label>Show top routes</label>
+    <div class="row">
+      <input id="topn" type="range" min="0" max="50" step="1" value="0" style="flex:1"/>
+      <span id="topnVal">All</span>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <input type="checkbox" id="heatToggle"/>
+      <label for="heatToggle" style="margin:0">Show neighborhood heat</label>
+    </div>
+    <div class="row">
+      <input id="heatRadius" type="range" min="20" max="80" step="2" value="45" style="flex:1"/>
+      <span id="heatRadiusVal">45 px</span>
+    </div>
+
+    <label>Filter routes (multi-select)</label>
+    <div class="suggest">
+      <input id="routeSearch" type="text" placeholder="Type number or name…"/>
+      <div id="suggestList" class="suggest-list"></div>
+    </div>
+    <div id="chips" class="chips"></div>
+
+    <div class="row" style="gap:12px;margin-top:10px">
+      <button id="play" title="Play/Pause">⏸ Pause</button>
+      <div style="flex:1">
+        <label style="margin:0">Animation speed</label>
+        <input id="speed" type="range" min="0.5" max="2.0" step="0.1" value="1.0" style="width:100%"/>
+      </div>
+    </div>
+
+    <!-- Normalization disabled (commented) -->
+    <!--
+    <div class="row" style="margin-top:10px">
+      <input type="checkbox" id="normFreq"/>
+      <label for="normFreq" style="margin:0">Normalize by frequency (boardings per trip)</label>
+    </div>
+    <div class="small" id="freqStatus">Loading GTFS trips… (needed for normalization)</div>
+    -->
+  </div>
+
+  <!-- RIGHT INSIGHTS -->
+  <div class="insights" id="insights">
+    <h3>Insights</h3>
+    <div class="kpi"><div class="muted" id="insMonth">—</div><div class="pill" id="insDay">—</div></div>
+    <div class="kpi">
+      <div class="muted">System total (avg boardings)</div>
+      <div><span class="big" id="insTotal">—</span> <span class="delta" id="insDelta"></span></div>
+    </div>
+    <div class="muted">Top routes</div>
+    <div class="list" id="insList"></div>
+  </div>
+</div>
+
+<script>
+const {DeckGL, ScatterplotLayer, PathLayer, TextLayer, HeatmapLayer} = deck;
+
+/* -------- animation state -------- */
+let SPEED_BASE = 1.0;
+let PLAYING = true;
+let lastFrameTime = performance.now();
+let INSIGHTS_HOVER_KEY = null;
+
+/* -------- basemap (with zoom buttons) -------- */
+const style = {
+  version:8,
+  glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+  sources:{
+    base:{type:"raster", tiles:["https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png"], tileSize:256, attribution:"© OpenStreetMap, © CARTO"},
+    labels:{type:"raster", tiles:["https://basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png"], tileSize:256}
+  },
+  layers:[
+    {id:"base", type:"raster", source:"base", paint:{"raster-opacity":0.95}},
+    {id:"labels", type:"raster", source:"labels", paint:{"raster-opacity":0.85}}
+  ]
+};
+const map = new maplibregl.Map({ container:'map', style, center:[-95.3698,29.7604], zoom:10.2, bearing:0, pitch:0 });
+map.dragRotate.disable(); map.touchZoomRotate.disableRotation();
+/* Zoom UI */
+map.addControl(new maplibregl.NavigationControl({showCompass:false, visualizePitch:false}), 'bottom-right');
+
+const deckgl = new DeckGL({canvas:'deck-canvas', controller:true});
+function syncView(){
+  const c=map.getCenter();
+  deckgl.setProps({viewState:{longitude:c.lng, latitude:c.lat, zoom:map.getZoom(), bearing:0, pitch:0}});
+}
+map.on('move', syncView); syncView();
+window.addEventListener('resize', ()=>deckgl.redraw(true));
+
+/* -------- loaders & utils -------- */
+async function loadJSON(p){const r=await fetch(p); return await r.json();}
+async function loadCSV(p){
+  const text = await (await fetch(p)).text();
+  const [header,...rows] = text.trim().split(/\r?\n/);
+  const cols = header.split(",");
+  return rows.map(line=>{
+    const vals = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
+    const o={}; cols.forEach((c,i)=>o[c]=vals[i]); return o;
+  });
+}
+function hexToRGB(hex){ const h=(hex||'#004080').replace('#',''); const n=parseInt(h,16)||0; return [(n>>16)&255,(n>>8)&255,n&255]; }
+function midpoint(coords){ if(!coords||coords.length<2) return coords?.[0]||[-95.36,29.76]; return coords[Math.floor(coords.length/2)]; }
+function logScale(v, vmax, lo=0.6, hi=1.8){ if(!vmax) return lo; const t=Math.log1p(Math.max(0,v))/Math.log1p(vmax); return lo + (hi-lo)*t; }
+function fmt(x){ return x==null || isNaN(x) ? "—" : (+x).toLocaleString(); }
+function pct(a,b){ if(!b || isNaN(a) || isNaN(b)) return null; return ((a-b)/b)*100; }
+
+function featureForKey(key){
+  return ROUTES.features.find(f => (f.properties.route_key||'').trim() === key);
+}
+function showTooltipForKey(key, stats, total, prevMap){
+  const f = featureForKey(key); if (!f) return hideTooltip();
+  const sn = (f.properties.route_short_name || key || "") + "";
+  const ln = (f.properties.route_long_name  || "") + "";
+  const label = ln ? `${sn} — ${ln}` : sn;
+
+  const val = stats.get(key);
+  const share = (val!=null && total>0) ? (100*val/total) : null;
+  const prev = prevMap ? prevMap.get(key) : null;
+  const delta = (prev!=null && val!=null) ? pct(val, prev) : null;
+
+  const pt = midpoint(f.geometry.coordinates);
+  const screen = map.project({lng: pt[0], lat: pt[1]});
+  const tt = document.getElementById('tt');
+  tt.style.display='block';
+  tt.style.left = (screen.x + 12) + 'px';
+  tt.style.top  = (screen.y + 12) + 'px';
+  tt.innerHTML = `<b>${label}</b><br>Avg boardings: ${fmt(val)}${share!=null?` · ${share.toFixed(1)}%`:''}${delta!=null?` · ${delta>=0?'▲':'▼'} ${Math.abs(delta).toFixed(1)}% MoM`:''}`;
+}
+function hideTooltip(){ document.getElementById('tt').style.display='none'; }
+
+/* -------- state -------- */
+let ROUTES=null, MASTER=null;
+let ROUTE_INDEX=[];
+let hoveredId=null, pinnedId=null;
+let SELECTED_KEYS=new Set();
+let LAST = {stats:null, keys:new Set(), top10:new Set(), colorMap:new Map(), heatPts:[], total:0, prevMap:null};
+
+/* -------- month/year selectors -------- */
+function initMonthYear(){
+  const monthSel = document.getElementById('monthSel');
+  const yearSel  = document.getElementById('yearSel');
+
+  const monthNames = Array.from({length:12}, (_,i)=> new Date(2000,i,1).toLocaleString('en-US',{month:'long'}));
+  monthSel.innerHTML = monthNames.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('');
+
+  const now = new Date(); now.setDate(1);
+  const last = new Date(now); last.setMonth(last.getMonth()-1);           // last complete month
+  const minYear = 2019;
+  const years = [];
+  for(let y=minYear; y<=last.getFullYear(); y++) years.push(y);
+  yearSel.innerHTML = years.map(y=>`<option value="${y}">${y}</option>`).join('');
+
+  monthSel.value = String(last.getMonth()+1);
+  yearSel.value  = String(last.getFullYear());
+
+  const stamp = ()=> {
+    const y=+yearSel.value, m=+monthSel.value;
+    document.getElementById('hdrStamp').textContent = `${new Date(y, m-1, 1).toLocaleString('en-US',{month:'long',year:'numeric'})} • ${document.getElementById('daytype').value}`;
+  };
+  monthSel.addEventListener('change', ()=>{ stamp(); update(); });
+  yearSel.addEventListener('change',  ()=>{ stamp(); update(); });
+  stamp();
+}
+
+/* -------- filters & stats -------- */
+function getFilter(){
+  const y=+document.getElementById('yearSel').value;
+  const m=+document.getElementById('monthSel').value;
+  const day=document.getElementById('daytype').value;
+  const scale=parseFloat(document.getElementById('scale').value);
+  const size=parseFloat(document.getElementById('psize').value);
+  const topn=+document.getElementById('topn').value;
+  const heatOn=document.getElementById('heatToggle').checked;
+  const heatRadius=+document.getElementById('heatRadius').value;
+
+  document.getElementById('scaleVal').textContent = scale.toFixed(2)+'x';
+  document.getElementById('psizeVal').textContent  = (size|0)+' m';
+  document.getElementById('topnVal').textContent   = topn>0 ? `Top ${topn}` : 'All';
+  document.getElementById('heatRadiusVal').textContent = heatRadius+' px';
+  document.getElementById('insDay').textContent = day;
+  document.getElementById('insMonth').textContent = new Date(y, m-1, 1).toLocaleString('en-US',{month:'long', year:'numeric'});
+  return {y,m,day,scale,size,topn,heatOn,heatRadius};
+}
+function normalizeCSVMode(m){ if(!m) return 'Bus'; return m.toLowerCase().includes('rail') ? 'Rail' : 'Bus'; }
+function prevMonth(y,m){ return m>1 ? [y,m-1] : [y-1,12]; }
+
+function joinStats({y,m,day}){
+  const rows = MASTER.filter(r => +r.year===y && +r.month===m && (r.day_type||"").trim()==day);
+  const map = new Map();
+  rows.forEach(r=>{
+    if (normalizeCSVMode(r.mode)!=='Bus') return;
+    const key=(r.route_key||r.route_name||r.line||"").trim(); if(!key) return;
+    let v = r.avg_boardings && !isNaN(+r.avg_boardings)? +r.avg_boardings : null;
+    if(!map.has(key) || (v!==null && map.get(key)===null)) map.set(key,v);
+  });
+  return map;
+}
+
+/* -------- multiselect (unchanged) -------- */
+function buildRouteIndex(){
+  ROUTE_INDEX = ROUTES.features.map(f=>{
+    const key=(f.properties.route_key||"")+""; const sn =(f.properties.route_short_name||key)+""; const ln =(f.properties.route_long_name||"")+"";
+    const label = ln ? `${sn} — ${ln}` : sn;
+    return {key, label, coords:f.geometry.coordinates, fid:f.properties._fid};
+  });
+}
+const routeSearch=document.getElementById('routeSearch'); const suggestList=document.getElementById('suggestList'); const chips=document.getElementById('chips');
+function refreshChips(){
+  chips.innerHTML=''; SELECTED_KEYS.forEach(k=>{
+    const r=ROUTE_INDEX.find(x=>x.key===k);
+    const div=document.createElement('div'); div.className='chip';
+    div.innerHTML=`<b>${r ? r.label : k}</b><button title="Remove">×</button>`;
+    div.querySelector('button').onclick=()=>{SELECTED_KEYS.delete(k); refreshChips(); update();};
+    chips.appendChild(div);
+  });
+}
+function showSuggestions(){
+  const q=(routeSearch.value||'').toLowerCase().trim(); if(!q){suggestList.style.display='none'; suggestList.innerHTML=''; return;}
+  const items=ROUTE_INDEX.filter(r=> r.label.toLowerCase().includes(q)).slice(0,12);
+  suggestList.innerHTML=items.map(it=>`<div class="suggest-item" data-key="${it.key}">${it.label}</div>`).join('');
+  suggestList.style.display=items.length?'block':'none';
+}
+routeSearch.addEventListener('input', showSuggestions);
+document.addEventListener('click', (e)=>{ if(!suggestList.contains(e.target) && e.target!==routeSearch) suggestList.style.display='none'; });
+suggestList.addEventListener('click', (e)=>{
+  const item=e.target.closest('.suggest-item'); if(!item) return;
+  const key=item.getAttribute('data-key'); if(!SELECTED_KEYS.has(key)){ SELECTED_KEYS.add(key); refreshChips(); update(); }
+  routeSearch.value=''; suggestList.style.display='none';
+});
+function pickRouteKeys(stats, topN){
+  if(SELECTED_KEYS.size) return {keys:new Set(SELECTED_KEYS)};
+  const rows = Array.from(stats.entries()).map(([k,v])=>({k, v:(v==null?0:+v)}));
+  if(topN>0){ rows.sort((a,b)=>b.v-a.v); return {keys:new Set(rows.slice(0,topN).map(r=>r.k))}; }
+  return {keys:new Set(rows.map(r=>r.k))};
+}
+function colorMapForTop10(sortedAll){
+  const PALETTE=[[230,57,70],[29,53,87],[255,183,3],[34,139,34],[143,0,255],[255,99,132],[0,159,183],[255,140,0],[68,36,102],[0,114,178]];
+  const map=new Map(); sortedAll.slice(0,10).forEach((r,i)=> map.set(r.k, PALETTE[i%PALETTE.length])); return map;
+}
+
+/* -------- particles / heat / render -------- */
+let particles=[];
+function seedParticles(stats, scale, sizeMeters, keysToShow){
+  particles=[]; const vmax=Math.max(...Array.from(stats.values()).filter(v=>v!=null && !isNaN(v)),0);
+  for(const f of ROUTES.features){
+    const key=(f.properties.route_key||"").trim(); if(!key || (keysToShow.size && !keysToShow.has(key))) continue;
+    const avg=stats.get(key)||0;
+    const base = Math.round((avg ? avg * scale * 0.018 : 0));
+    const count=Math.max(base, avg?1:0);
+    const radius=sizeMeters * logScale(avg, vmax, 0.7, 1.7);
+    for(let i=0;i<count;i++){
+      particles.push({ f, phase:Math.random(), speed:(0.018 + Math.random()*0.035), radius });
+    }
+  }
+}
+function ensureLens(f){
+  const c=f.geometry.coordinates; if(!c||c.length<2) return;
+  if(f._lens) return; f._lens=[0]; let acc=0;
+  for(let i=1;i<c.length;i++){ const dx=c[i][0]-c[i-1][0], dy=c[i][1]-c[i-1][1]; acc+=Math.hypot(dx,dy); f._lens.push(acc); }
+  f._total=acc||1e-6;
+}
+function pointAtT(f,t){
+  ensureLens(f);
+  const L=f._lens, C=f.geometry.coordinates, T=t*f._total;
+  let i=1; while(i<L.length && L[i]<T) i++;
+  const a=C[i-1], b=C[i]||a, seg=(L[i]-L[i-1])||1e-6, u=(T-L[i-1])/seg;
+  return [a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u];
+}
+function buildHeatPoints(stats, keysToShow){
+  const pts=[]; for(const f of ROUTES.features){
+    const key=(f.properties.route_key||'').trim(); if(!key || (keysToShow.size && !keysToShow.has(key))) continue;
+    const v=stats.get(key)||0; if(v<=0) continue; ensureLens(f);
+    const samples=Math.max(3, Math.floor(f._total/0.008));
+    for(let i=0;i<samples;i++){ const t=i/(samples-1); const p=pointAtT(f,t); pts.push({position:p, weight:v/samples}); }
+  }
+  return pts;
+}
+function renderLayers(stats, keysToShow, top10Set, colorMap, heatPts, heatOn, heatRadius){
+  if(!ROUTES) return;
+
+  const dots=[]; const now=performance.now(); const dt=(now-lastFrameTime)/1000;
+  for(const p of particles){
+    if(PLAYING) p.phase=(p.phase + dt * p.speed * SPEED_BASE) % 1;
+    const pos=pointAtT(p.f, p.phase); if(!pos) continue;
+    const key=(p.f.properties.route_key||'').trim();
+    if(keysToShow.size && !keysToShow.has(key)) continue;
+    const topColor = colorMap.get(key);
+    const col = topColor ? topColor : [255,255,255,220];
+    dots.push({position:pos, radius:p.radius, color:col});
+  }
+  lastFrameTime=performance.now();
+
+  const mainRoutes = keysToShow.size ? ROUTES.features.filter(f=> keysToShow.has((f.properties.route_key||'').trim())) : ROUTES.features;
+
+  const vmax = Math.max(...Array.from(stats.values()).filter(v=>v!=null && !isNaN(v)), 0);
+  const widthFor = f=>{
+    const k=(f.properties.route_key||'').trim(); const v=stats.get(k)||0;
+    const base=3.0; const ridg=logScale(v, vmax, 0.9, 1.9); const tier=top10Set.has(k) ? 1.25 : 0.55;
+    return base * ridg * tier;
+  };
+  const lineColorFor = f=>{
+    const k=(f.properties.route_key||'').trim(); const c=colorMap.get(k);
+    const base = c ? c : hexToRGB(f.properties.route_color || '#0b3a6b');
+    return top10Set.has(k) ? base : [base[0], base[1], base[2], 150];
+  };
+
+  const routesLayer = new PathLayer({
+    id:'routes', data: mainRoutes,
+    getPath:f=>f.geometry.coordinates,
+    getWidth: widthFor, widthUnits:'pixels',
+    getColor: lineColorFor, opacity: heatOn ? 0.65 : 0.78,
+    pickable:true,
+    onHover: info=>{
+      hoveredId = (info.object && info.object.properties)? info.object.properties._fid : null;
+      map.getCanvas().style.cursor = hoveredId!=null ? 'pointer' : '';
+      highlightInsightsRow(hoveredId ? (info.object.properties.route_key||'').trim() : null);
+      if(info.object){
+        const key=(info.object.properties.route_key||'').trim();
+        showTooltipForKey(key, LAST.stats, LAST.total, LAST.prevMap);
+      }else{ hideTooltip(); }
+    }
+  });
+
+  const labelData = mainRoutes.filter(f=> f.properties._fid===hoveredId || f.properties._fid===pinnedId)
+    .map(f=>{ const sn=(f.properties.route_short_name||f.properties.route_key||"")+""; const ln=(f.properties.route_long_name||"")+""; return {pos: midpoint(f.geometry.coordinates), text: ln?`${sn} — ${ln}`:sn}; });
+
+  const labelLayer = new TextLayer({
+    id:'labels', data: labelData,
+    getPosition:d=>d.pos, getText:d=>d.text,
+    sizeUnits:'pixels', getSize:12,
+    getColor:[0,0,0,225],
+    getBackgroundColor:[255,255,255,220],
+    background:true, backgroundPadding:[3,3], billboard:true
+  });
+
+  const flowLayer = new ScatterplotLayer({
+    id:'flow', data:dots, pickable:false,
+    getPosition:d=>d.position,
+    getRadius:d=>d.radius, radiusUnits:'meters',
+    getFillColor:d=>d.color, opacity:0.9,
+    stroked:true, getLineWidth:.4, lineWidthUnits:'pixels',
+    getLineColor:[0,0,0,110]
+  });
+
+  const heatLayer = new HeatmapLayer({
+    id:'heat', data: heatPts,
+    getPosition:d=>d.position, getWeight:d=>d.weight,
+    radiusPixels: heatRadius, intensity: 1.0, threshold: 0.02
+  });
+
+  const layers = heatOn ? [heatLayer, routesLayer, labelLayer, flowLayer] : [routesLayer, labelLayer, flowLayer];
+  deckgl.setProps({layers});
+}
+
+/* -------- insights (with % share and MoM, no normalization) -------- */
+function renderInsights({y,m,day}, stats){
+  const monthName = new Date(y, m-1, 1).toLocaleString('en-US',{month:'long', year:'numeric'});
+  document.getElementById('insMonth').textContent = monthName;
+  document.getElementById('insDay').textContent   = day;
+
+  // totals
+  let total = 0; stats.forEach(v=>{ if(v!=null && !isNaN(v)) total += +v; });
+  LAST.total = total;
+  document.getElementById('insTotal').textContent = fmt(Math.round(total));
+
+  // MoM delta (system)
+  const [py, pm] = prevMonth(y,m);
+  const prevRows = MASTER.filter(r=> +r.year===py && +r.month===pm && (r.day_type||"").trim()===day)
+                         .filter(r=> normalizeCSVMode(r.mode)==='Bus');
+  let prevTotal = 0; const prevMap=new Map();
+  prevRows.forEach(r=>{
+    let v=+r.avg_boardings; if(isNaN(v)) return;
+    const k=(r.route_key||r.route_name||r.line||"").trim();
+    prevMap.set(k, v); prevTotal += v;
+  });
+  LAST.prevMap = prevMap;
+
+  const d = pct(total, prevTotal);
+  const deltaEl=document.getElementById('insDelta');
+  if(d==null){ deltaEl.textContent=''; deltaEl.className='delta'; }
+  else{
+    const up=d>=0; deltaEl.className='delta ' + (up?'up':'down');
+    deltaEl.textContent=`${up?'▲':'▼'} ${Math.abs(d).toFixed(1)}% vs prev. month`;
+  }
+
+  // top routes list with % share + per-route delta
+  const rows = Array.from(stats.entries()).map(([k,v])=>({k, v:(v==null?0:+v), p: prevMap.get(k)}))
+                    .sort((a,b)=>b.v-a.v).slice(0,10);
+  const list=document.getElementById('insList');
+  list.innerHTML = rows.map(r=>{
+    const rec=ROUTE_INDEX.find(x=>x.key===r.k); const label=rec?rec.label:r.k;
+    const share = total>0 ? (100*r.v/total).toFixed(1) : null;
+    const dm = (r.p!=null && r.v!=null) ? pct(r.v, r.p) : null;
+    const arrow = dm==null ? '' : (dm>=0?'▲':'▼');
+    const cls   = dm==null ? '' : (dm>=0?'up':'down');
+    return `<div class="item" data-key="${r.k}">
+      <b>${label}</b><span>${fmt(r.v)}</span>
+      <div class="meta">${share!=null?`${share}% of system`:'—'}${dm!=null?` · <span class="delta ${cls}">${arrow} ${Math.abs(dm).toFixed(1)}%</span>`:''}</div>
+    </div>`;
+  }).join('');
+
+  [...list.querySelectorAll('.item')].forEach(el=>{
+    el.onmouseenter = ()=>{
+      INSIGHTS_HOVER_KEY = el.getAttribute('data-key');
+      highlightInsightsRow(INSIGHTS_HOVER_KEY);
+      showTooltipForKey(INSIGHTS_HOVER_KEY, LAST.stats, LAST.total, LAST.prevMap);
+      renderLayers(LAST.stats, LAST.keys, LAST.top10, LAST.colorMap, LAST.heatPts,
+                   document.getElementById('heatToggle').checked,
+                   +document.getElementById('heatRadius').value);
+    };
+    el.onmouseleave = ()=>{
+      INSIGHTS_HOVER_KEY=null; highlightInsightsRow(null); hideTooltip();
+      renderLayers(LAST.stats, LAST.keys, LAST.top10, LAST.colorMap, LAST.heatPts,
+                   document.getElementById('heatToggle').checked,
+                   +document.getElementById('heatRadius').value);
+    };
+  });
+}
+function highlightInsightsRow(key){
+  const list=document.getElementById('insList');
+  [...list.querySelectorAll('.item')].forEach(el=> el.classList.toggle('hl', key && el.getAttribute('data-key')===key) );
+}
+
+/* -------- update pipeline -------- */
+function update(){
+  if(!ROUTES || !MASTER) return;
+  const f=getFilter();
+  const stats=joinStats(f);
+
+  const sortedAll=Array.from(stats.entries()).map(([k,v])=>({k, v:(v==null?0:+v)})).sort((a,b)=>b.v-a.v);
+  const top10Set=new Set(sortedAll.slice(0,10).map(r=>r.k));
+  const colorMap=(function(){ const PALETTE=[[230,57,70],[29,53,87],[255,183,3],[34,139,34],[143,0,255],[255,99,132],[0,159,183],[255,140,0],[68,36,102],[0,114,178]]; const m=new Map(); sortedAll.slice(0,10).forEach((r,i)=>m.set(r.k, PALETTE[i%PALETTE.length])); return m; })();
+
+  const picked=pickRouteKeys(stats, f.topn);
+  seedParticles(stats, f.scale, f.size, picked.keys);
+  const heatPts = f.heatOn ? buildHeatPoints(stats, picked.keys) : [];
+
+  LAST = {...LAST, stats, keys:picked.keys, top10:top10Set, colorMap, heatPts};
+  renderLayers(stats, picked.keys, top10Set, colorMap, heatPts, f.heatOn, f.heatRadius);
+  renderInsights(f, stats);
+}
+
+/* -------- events -------- */
+document.getElementById('daytype').addEventListener('change', update);
+document.getElementById('scale').addEventListener('input', update);
+document.getElementById('psize').addEventListener('input', update);
+document.getElementById('topn').addEventListener('input', ()=>{ const n=+document.getElementById('topn').value; document.getElementById('topnVal').textContent=n>0?`Top ${n}`:'All'; update(); });
+document.getElementById('heatToggle').addEventListener('change', update);
+document.getElementById('heatRadius').addEventListener('input', ()=> renderLayers(LAST.stats,LAST.keys,LAST.top10,LAST.colorMap,LAST.heatPts,true,+document.getElementById('heatRadius').value));
+document.getElementById('play').addEventListener('click', ()=>{ PLAYING=!PLAYING; document.getElementById('play').textContent = PLAYING ? '⏸ Pause' : '▶️ Play'; });
+document.getElementById('speed').addEventListener('input', (e)=>{ SPEED_BASE=parseFloat(e.target.value); });
+
+/* -------- boot -------- */
+(async ()=>{
+  ROUTES = await loadJSON("./data/geo/routes.geojson");
+  // Bus only (drop rail); treat Rapid/BRT as Bus
+  ROUTES.features.forEach((f,i)=>{
+    f.properties._fid = i;
+    const lname = (f.properties.route_long_name||'').toLowerCase();
+    if (lname.includes('red line') || lname.includes('green line') || lname.includes('purple line') || lname.includes('metrorail')) {
+      f._drop = true;
+    } else {
+      if (lname.includes('silver')) f.properties.route_key = 'METRORapid Silver';
+      f.properties.mode = 'Bus';
+    }
+  });
+  ROUTES.features = ROUTES.features.filter(f=>!f._drop);
+
+  MASTER = await loadCSV("./data/master_ridership.csv");
+  MASTER.forEach(r=>{ if(r.route_id!=null) r.route_id=r.route_id.toString().trim(); });
+  buildRouteIndex();
+
+  initMonthYear();   // set default & wire up events
+  update();
+
+  // Normalization fully disabled:
+  // loadGTFSCounts();  // ← not called
+  // FREQ_READY / tripsForCSVRow logic removed
+  (function tick(){
+    if(LAST.stats){
+      renderLayers(LAST.stats, LAST.keys, LAST.top10, LAST.colorMap, LAST.heatPts,
+                   document.getElementById('heatToggle').checked,
+                   +document.getElementById('heatRadius').value);
+    }
+    requestAnimationFrame(tick);
+  })();
+})();
+</script>
+</body>
+</html>
